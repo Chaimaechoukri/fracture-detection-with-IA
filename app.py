@@ -1,57 +1,72 @@
-from flask import Flask, request, render_template
-import os
+from flask import Flask, render_template, request, jsonify
 import tensorflow as tf
-from utils.data_processing import preprocess_image
+import numpy as np
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+import os
+import pandas as pd
 
-# Initialisation de Flask
 app = Flask(__name__)
 
-# Vérification et chargement du modèle
-MODEL_PATH = "model/anomaly_detection_model.h5"
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(
-        "Model file not found. Please run train.py first to train and save the model."
-    )
+# Load the model and class names globally
+print("Loading model...")
+model = tf.keras.models.load_model('image_classifier_model.h5')
 
-try:
-    model = tf.keras.models.load_model(MODEL_PATH)
-    print("Model loaded successfully!")
-except Exception as e:
-    raise Exception(f"Error loading model: {str(e)}")
+# Load class names from test CSV
+test_csv_path = os.path.join('data/test', '_classes.csv')
+df = pd.read_csv(test_csv_path)
+CLASS_NAMES = df.columns[1:].tolist()
 
-# Définition des classes (Exemple : adapte cette liste selon ton modèle)
-CLASS_NAMES = ["Pas de Fracture", "Fracture Simple", "Fracture Complexe"]
-
-# Création du dossier pour les uploads
-UPLOAD_FOLDER = "static/uploads"
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+def preprocess_image(image_path):
+    """Preprocess image for prediction"""
+    img = load_img(image_path, target_size=(224, 224))
+    img_array = img_to_array(img)
+    img_array = img_array / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+    return img_array
 
 @app.route('/')
-def index():
-    return render_template("index.html")
+def home():
+    return render_template('index.html')
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if 'file' not in request.files:
-        return "Aucun fichier sélectionné"
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'})
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'})
+        
+        # Save the uploaded file temporarily
+        temp_path = 'temp_upload.jpg'
+        file.save(temp_path)
+        
+        # Preprocess the image
+        img_array = preprocess_image(temp_path)
+        
+        # Make prediction
+        predictions = model.predict(img_array)[0]
+        
+        # Format results
+        results = []
+        for class_name, probability in zip(CLASS_NAMES, predictions):
+            if probability > 0.5:  # Only include predictions with >50% confidence
+                results.append({
+                    'class': class_name,
+                    'probability': float(probability) * 100
+                })
+        
+        # Sort results by probability
+        results = sorted(results, key=lambda x: x['probability'], reverse=True)
+        
+        # Clean up
+        os.remove(temp_path)
+        
+        return jsonify({'predictions': results})
     
-    file = request.files['file']
-    if file.filename == '':
-        return "Aucun fichier sélectionné"
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(file_path)
-
-    # Prétraiter l'image
-    image = preprocess_image(file_path)
-
-    # Faire une prédiction
-    prediction = model.predict(image)
-    predicted_index = prediction.argmax(axis=1)[0]
-    predicted_class = CLASS_NAMES[predicted_index]
-
-    return render_template("result.html", prediction=predicted_class, image=file_path)
-
-if __name__ == "__main__":
-    app.run(debug=True)
+if __name__ == '__main__':
+    app.run(debug=True) 
